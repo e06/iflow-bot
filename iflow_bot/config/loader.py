@@ -83,6 +83,7 @@ def _create_default_config(config_path: Path) -> None:
             "thinking": False,
             "max_turns": 40,
             "timeout": 300,
+            "compression_trigger_tokens": 88888,
             "workspace": str(Path.home() / ".iflow-bot" / "workspace"),
             "extra_args": []
         },

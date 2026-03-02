@@ -287,6 +287,12 @@ class FeishuChannel(BaseChannel):
             logger.error("Feishu SDK not installed. Run: pip install lark-oapi")
             return
 
+        # 降噪：屏蔽 Lark SDK 对未注册事件（如 reaction/message_read）的错误日志刷屏
+        for sdk_logger_name in ("lark_oapi", "lark_oapi.ws", "lark_oapi.ws.client"):
+            sdk_logger = logging.getLogger(sdk_logger_name)
+            sdk_logger.setLevel(logging.CRITICAL)
+            sdk_logger.propagate = False
+
         if not self.config.app_id or not self.config.app_secret:
             logger.error("Feishu app_id and app_secret not configured")
             return

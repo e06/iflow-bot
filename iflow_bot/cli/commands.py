@@ -717,6 +717,11 @@ async def _run_gateway(config, verbose: bool = False) -> None:
         thinking=config.driver.thinking if hasattr(config, "driver") and config.driver else False,
         mode=mode,
         acp_port=acp_port,
+        compression_trigger_tokens=(
+            getattr(config.driver, "compression_trigger_tokens", 88888)
+            if hasattr(config, "driver") and config.driver
+            else 88888
+        ),
     )
     
     bus = MessageBus()
@@ -1014,6 +1019,11 @@ def sessions(
     adapter = IFlowAdapter(
         default_model=config.get_model(),
         workspace=workspace if workspace else None,
+        compression_trigger_tokens=(
+            getattr(config.driver, "compression_trigger_tokens", 88888)
+            if hasattr(config, "driver") and config.driver
+            else 88888
+        ),
     )
     mappings = adapter.session_mappings
     
@@ -1188,6 +1198,7 @@ def onboard(
             "thinking": False,
             "max_turns": 40,
             "timeout": 300,
+            "compression_trigger_tokens": 88888,
             "workspace": str(Path.home() / ".iflow-bot" / "workspace"),
             "extra_args": []
         },

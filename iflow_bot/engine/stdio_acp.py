@@ -23,6 +23,7 @@ import asyncio
 import json
 import platform
 import uuid
+from datetime import datetime
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -663,6 +664,7 @@ class StdioACPAdapter:
         timeout: int = 300,
         default_model: str = "glm-5",
         thinking: bool = False,
+        active_compress_trigger_tokens: int = 88888,
     ):
         self.iflow_path = iflow_path
         self.workspace = workspace
@@ -672,6 +674,11 @@ class StdioACPAdapter:
         
         self._client: Optional[StdioACPClient] = None
         self._session_map: dict[str, str] = {}
+        self._loaded_sessions: set[str] = set()
+        self._rehydrate_history: dict[str, str] = {}
+        self._memory_constraints_cache: Optional[str] = None
+        self._active_compress_trigger_tokens = max(0, int(active_compress_trigger_tokens))
+        self._active_compress_budget_tokens = 2200
         self._session_map_file = Path.home() / ".iflow-bot" / "session_mappings.json"
         self._session_lock = asyncio.Lock()
         self._load_session_map()
@@ -728,7 +735,12 @@ IDENTITY.md - Your Identity（你的身份）定义了你的具体身份信息�
 USERY.md - User Identity（用户身份）定义了用户的具体身份信息，如名字、年龄、职业、兴趣爱好等。
 TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表，包括每个工具的名称、功能描述、使用方法等, 每次学会一个工具，你便要主动更新该文件。"""
     
-    def _extract_conversation_history(self, session_id: str, max_turns: int = 20) -> Optional[str]:
+    def _extract_conversation_history(
+        self,
+        session_id: str,
+        max_turns: int = 20,
+        token_budget: int = 3000,
+    ) -> Optional[str]:
         import datetime
         
         session_file = self._find_session_file(session_id)
@@ -744,10 +756,8 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
             if not chat_history:
                 return None
             
-            recent_chats = chat_history[-max_turns:] if len(chat_history) > max_turns else chat_history
-            
-            conversations = []
-            for chat in recent_chats:
+            all_conversations: list[tuple[str, str, str]] = []
+            for chat in chat_history:
                 role = chat.get("role")
                 parts = chat.get("parts", [])
                 
@@ -780,7 +790,7 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
                             time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
                         except:
                             pass
-                    conversations.append(f"{time_str}\n用户：{content}")
+                    all_conversations.append(("user", time_str, content))
                 
                 elif role == "model":
                     content = full_text.strip()
@@ -792,18 +802,98 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
                         continue
                     
                     if len(content) > 10:
-                        conversations.append(f"我：{content}")
+                        all_conversations.append(("assistant", "", content))
             
-            if not conversations:
+            if not all_conversations:
                 return None
-            
-            history = "<history_context>\n" + "\n\n".join(conversations) + "\n</history_context>"
-            logger.info(f"Extracted {len(conversations)} conversation turns from session {session_id[:16]}...")
+
+            history = self._build_budgeted_history_context(
+                all_conversations,
+                token_budget=token_budget,
+                recent_turns=max_turns,
+            )
+            logger.info(
+                f"Extracted {len(all_conversations)} conversation turns from session {session_id[:16]}..."
+            )
             return history
             
         except Exception as e:
             logger.warning(f"Failed to extract conversation history: {e}")
             return None
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        if not text:
+            return 0
+        # 粗略估算：中英文混合场景按 4 chars ≈ 1 token
+        return max(1, len(text) // 4)
+
+    @staticmethod
+    def _clip_text(text: str, max_chars: int) -> str:
+        clean = (text or "").strip()
+        if len(clean) <= max_chars:
+            return clean
+        return clean[:max_chars].rstrip() + "..."
+
+    def _build_budgeted_history_context(
+        self,
+        conversations: list[tuple[str, str, str]],
+        token_budget: int = 3000,
+        recent_turns: int = 20,
+    ) -> str:
+        if not conversations:
+            return "<history_context>\n</history_context>"
+
+        def fmt(role: str, time_str: str, content: str, max_chars: int) -> str:
+            body = self._clip_text(content, max_chars)
+            if role == "user":
+                return f"{time_str}\n用户：{body}".strip()
+            return f"我：{body}"
+
+        recent = conversations[-recent_turns:] if recent_turns > 0 else []
+        older = conversations[:-len(recent)] if recent else conversations[:]
+
+        summary_lines: list[str] = []
+        if older:
+            summary_lines.append("更早对话摘要：")
+            for role, time_str, content in older[-40:]:
+                prefix = "用户" if role == "user" else "我"
+                item = self._clip_text(content, 120)
+                if time_str:
+                    summary_lines.append(f"- {time_str} {prefix}: {item}")
+                else:
+                    summary_lines.append(f"- {prefix}: {item}")
+
+        blocks = [fmt(role, time_str, content, 1600) for role, time_str, content in recent]
+        summary_block = "\n".join(summary_lines).strip()
+
+        def build_text(cur_summary: str, cur_blocks: list[str]) -> str:
+            parts: list[str] = []
+            if cur_summary:
+                parts.append(cur_summary)
+            parts.extend([b for b in cur_blocks if b.strip()])
+            return "<history_context>\n" + "\n\n".join(parts).strip() + "\n</history_context>"
+
+        text = build_text(summary_block, blocks)
+
+        # 优先丢弃最老的 recent blocks，确保最新上下文保留
+        while self._estimate_tokens(text) > token_budget and len(blocks) > 4:
+            blocks.pop(0)
+            text = build_text(summary_block, blocks)
+
+        # 再压缩摘要粒度
+        if self._estimate_tokens(text) > token_budget and summary_block:
+            compact_summary_lines = []
+            for line in summary_lines[:24]:
+                compact_summary_lines.append(self._clip_text(line, 90))
+            summary_block = "\n".join(compact_summary_lines)
+            text = build_text(summary_block, blocks)
+
+        # 最后兜底裁剪
+        while self._estimate_tokens(text) > token_budget and len(text) > 200:
+            text = text[: max(200, int(len(text) * 0.9))].rstrip() + "\n</history_context>"
+
+        return text
     
     async def connect(self) -> None:
         if self._client is None:
@@ -829,6 +919,175 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
         return f"{channel}:{chat_id}"
 
     @staticmethod
+    def _inject_history_before_user_message(message: str, history_context: str) -> str:
+        if not history_context:
+            return message
+        user_msg_marker = "用户消息:"
+        if user_msg_marker in message:
+            idx = message.find(user_msg_marker)
+            return message[:idx] + history_context + "\n\n" + message[idx:]
+        return f"{history_context}\n\n{message}"
+
+    def _persist_compression_snapshot(
+        self,
+        channel: str,
+        chat_id: str,
+        reason: str,
+        history_context: str,
+        estimated_tokens: int = 0,
+    ) -> None:
+        text = (history_context or "").strip()
+        if not text:
+            return
+        text = text.replace("<history_context>", "").replace("</history_context>", "").strip()
+        if len(text) > 2400:
+            text = text[:2400].rstrip() + "\n..."
+
+        workspace = self.workspace or Path.cwd()
+        memory_dir = workspace / "memory"
+        try:
+            memory_dir.mkdir(parents=True, exist_ok=True)
+            day_file = memory_dir / f"{datetime.now().strftime('%Y-%m-%d')}.md"
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            entry = (
+                f"\n\n## [{ts}] Compression Snapshot\n"
+                f"- session: {channel}:{chat_id}\n"
+                f"- reason: {reason}\n"
+                f"- estimated_tokens: {estimated_tokens}\n\n"
+                f"{text}\n"
+            )
+            with open(day_file, "a", encoding="utf-8") as f:
+                f.write(entry)
+            logger.info(
+                f"Persisted compression snapshot to {day_file} for {channel}:{chat_id} ({reason})"
+            )
+        except Exception as e:
+            logger.warning(f"Failed to persist compression snapshot: {e}")
+
+    def _load_memory_constraints(self) -> str:
+        if self._memory_constraints_cache is not None:
+            return self._memory_constraints_cache
+        workspace = self.workspace or Path.cwd()
+        agents_file = workspace / "AGENTS.md"
+        if not agents_file.exists():
+            self._memory_constraints_cache = ""
+            return ""
+        try:
+            content = agents_file.read_text(encoding="utf-8")
+        except Exception:
+            self._memory_constraints_cache = ""
+            return ""
+        marker = "## Memory"
+        start = content.find(marker)
+        if start < 0:
+            self._memory_constraints_cache = ""
+            return ""
+        tail = content[start:]
+        next_idx = tail.find("\n## ", len(marker))
+        section = tail if next_idx < 0 else tail[:next_idx]
+        lines = [line.strip() for line in section.splitlines() if line.strip()]
+        keep: list[str] = []
+        for line in lines:
+            lower = line.lower()
+            if "daily notes" in lower or "long-term" in lower:
+                keep.append(line)
+            if "only load in main session" in lower:
+                keep.append(line)
+            if "do not load in shared contexts" in lower:
+                keep.append(line)
+            if "security" in lower and "shared contexts" in lower:
+                keep.append(line)
+        self._memory_constraints_cache = "\n".join(keep[:8]) if keep else ""
+        return self._memory_constraints_cache
+
+    def _apply_compression_constraints(self, history_context: str, channel: str, chat_id: str) -> str:
+        if not history_context:
+            return history_context
+        constraints = self._load_memory_constraints()
+        if not constraints:
+            return history_context
+        is_group_like = False
+        chat_text = str(chat_id or "")
+        if channel == "telegram" and chat_text.startswith("-"):
+            is_group_like = True
+        if channel in {"discord", "slack"}:
+            is_group_like = True
+        security_note = (
+            "共享会话安全约束：禁止注入或泄露 MEMORY.md 的个人长期记忆，只保留任务相关事实。"
+            if is_group_like
+            else "主会话约束：可参考 memory/MEMORY.md 的长期记忆，但仅用于任务连续性。"
+        )
+        return (
+            "<memory_constraints>\n"
+            f"{constraints}\n"
+            f"{security_note}\n"
+            "压缩要求：保留关键决策、用户偏好、未完成事项；优先保留最近信息，去除冗余。\n"
+            "</memory_constraints>\n\n"
+            f"{history_context}"
+        )
+
+    def _estimate_session_history_tokens(self, session_id: str) -> int:
+        session_file = self._find_session_file(session_id)
+        if not session_file:
+            return 0
+        try:
+            data = json.loads(session_file.read_text(encoding="utf-8"))
+        except Exception:
+            return 0
+        chat_history = data.get("chatHistory") or []
+        if not isinstance(chat_history, list):
+            return 0
+        total_chars = 0
+        for chat in chat_history:
+            if not isinstance(chat, dict):
+                continue
+            parts = chat.get("parts", [])
+            if not isinstance(parts, list):
+                continue
+            for part in parts:
+                if isinstance(part, dict):
+                    total_chars += len(str(part.get("text", "")))
+        return max(1, total_chars // 4)
+
+    async def _maybe_compress_active_session(
+        self,
+        key: str,
+        channel: str,
+        chat_id: str,
+        session_id: str,
+        message: str,
+        model: Optional[str],
+    ) -> tuple[str, str]:
+        estimated_tokens = self._estimate_session_history_tokens(session_id)
+        if estimated_tokens < self._active_compress_trigger_tokens:
+            return session_id, message
+
+        logger.warning(
+            f"Active session too large ({estimated_tokens} tokens est), rotating with compressed context: {key}"
+        )
+        history_context = self._extract_conversation_history(
+            session_id,
+            max_turns=40,
+            token_budget=self._active_compress_budget_tokens,
+        ) or ""
+        if not history_context:
+            return session_id, message
+
+        self._persist_compression_snapshot(
+            channel=channel,
+            chat_id=chat_id,
+            reason="active_session_rotate",
+            history_context=history_context,
+            estimated_tokens=estimated_tokens,
+        )
+        history_context = self._apply_compression_constraints(history_context, channel, chat_id)
+        await self._invalidate_session(key)
+        new_session_id = await self._create_new_session(key, model)
+        new_message = self._inject_history_before_user_message(message, history_context)
+        logger.info(f"Active session compressed and rotated for {key}")
+        return new_session_id, new_message
+
+    @staticmethod
     def _is_context_overflow_error(error_text: str) -> bool:
         text = (error_text or "").lower()
         keywords = [
@@ -851,8 +1110,33 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
         key = self._get_session_key(channel, chat_id)
         
         if key in self._session_map:
-            logger.debug(f"Reusing existing session: {key} -> {self._session_map[key][:16]}...")
-            return self._session_map[key]
+            session_id = self._session_map[key]
+            if session_id in self._loaded_sessions:
+                logger.debug(f"Reusing existing session: {key} -> {session_id[:16]}...")
+                return session_id
+
+            if not self._client:
+                raise StdioACPConnectionError("StdioACP client not connected")
+
+            loaded = await self._client.load_session(session_id)
+            if loaded:
+                self._loaded_sessions.add(session_id)
+                logger.info(f"Loaded existing session for {key}: {session_id[:16]}...")
+                return session_id
+
+            logger.warning(f"Failed to load mapped session for {key}, recreating")
+            history_context = self._extract_conversation_history(session_id) or ""
+            if history_context:
+                self._persist_compression_snapshot(
+                    channel=channel,
+                    chat_id=chat_id,
+                    reason="load_failed_rehydrate",
+                    history_context=history_context,
+                    estimated_tokens=self._estimate_tokens(history_context),
+                )
+                self._rehydrate_history[key] = history_context
+                logger.info(f"Queued history rehydrate for {key} before first prompt")
+            await self._invalidate_session(key)
         
         return await self._create_new_session(key, model)
     
@@ -877,6 +1161,7 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
             )
             
             self._session_map[key] = session_id
+            self._loaded_sessions.add(session_id)
             self._save_session_map()
             logger.info(f"StdioACP session mapped: {key} -> {session_id[:16]}...")
             
@@ -885,6 +1170,7 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
     async def _invalidate_session(self, key: str) -> Optional[str]:
         old_session = self._session_map.pop(key, None)
         if old_session:
+            self._loaded_sessions.discard(old_session)
             self._save_session_map()
             logger.info(f"Session invalidated: {key} -> {old_session[:16]}...")
         return old_session
@@ -902,6 +1188,14 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
         
         key = self._get_session_key(channel, chat_id)
         session_id = await self._get_or_create_session(channel, chat_id, model)
+        queued_history = self._rehydrate_history.pop(key, "")
+        if queued_history:
+            queued_history = self._apply_compression_constraints(queued_history, channel, chat_id)
+            message = self._inject_history_before_user_message(message, queued_history)
+            logger.info(f"Injected queued history for {key}")
+        session_id, message = await self._maybe_compress_active_session(
+            key, channel, chat_id, session_id, message, model
+        )
 
         try:
             response = await self._client.prompt(
@@ -934,12 +1228,15 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
             session_id = await self._create_new_session(key, model)
             
             if history_context:
-                user_msg_marker = "用户消息:"
-                if user_msg_marker in message:
-                    idx = message.find(user_msg_marker)
-                    message = message[:idx] + history_context + "\n\n" + message[idx:]
-                else:
-                    message = f"{history_context}\n\n{message}"
+                self._persist_compression_snapshot(
+                    channel=channel,
+                    chat_id=chat_id,
+                    reason="invalid_request_recreate",
+                    history_context=history_context,
+                    estimated_tokens=self._estimate_tokens(history_context),
+                )
+                history_context = self._apply_compression_constraints(history_context, channel, chat_id)
+                message = self._inject_history_before_user_message(message, history_context)
                 logger.info(f"Injected conversation history before user message")
             
             response = await self._client.prompt(
@@ -953,18 +1250,25 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
             old_session_id = await self._invalidate_session(key)
             history_context = ""
             if old_session_id:
-                history_context = self._extract_conversation_history(old_session_id, max_turns=4) or ""
+                history_context = self._extract_conversation_history(
+                    old_session_id,
+                    max_turns=4,
+                    token_budget=1200,
+                ) or ""
 
             session_id = await self._create_new_session(key, model)
 
             retry_message = message
             if history_context:
-                user_msg_marker = "用户消息:"
-                if user_msg_marker in retry_message:
-                    idx = retry_message.find(user_msg_marker)
-                    retry_message = retry_message[:idx] + history_context + "\n\n" + retry_message[idx:]
-                else:
-                    retry_message = f"{history_context}\n\n{retry_message}"
+                self._persist_compression_snapshot(
+                    channel=channel,
+                    chat_id=chat_id,
+                    reason="context_overflow_compact_retry",
+                    history_context=history_context,
+                    estimated_tokens=self._estimate_tokens(history_context),
+                )
+                history_context = self._apply_compression_constraints(history_context, channel, chat_id)
+                retry_message = self._inject_history_before_user_message(retry_message, history_context)
                 logger.info("Injected compact conversation history before user message")
 
             response = await self._client.prompt(
@@ -1000,6 +1304,14 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
         
         key = self._get_session_key(channel, chat_id)
         session_id = await self._get_or_create_session(channel, chat_id, model)
+        queued_history = self._rehydrate_history.pop(key, "")
+        if queued_history:
+            queued_history = self._apply_compression_constraints(queued_history, channel, chat_id)
+            message = self._inject_history_before_user_message(message, queued_history)
+            logger.info(f"Injected queued history for {key} (stream)")
+        session_id, message = await self._maybe_compress_active_session(
+            key, channel, chat_id, session_id, message, model
+        )
         
         content_parts: list[str] = []
         
@@ -1061,12 +1373,15 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
             session_id = await self._create_new_session(key, model)
             
             if history_context:
-                user_msg_marker = "用户消息:"
-                if user_msg_marker in message:
-                    idx = message.find(user_msg_marker)
-                    message = message[:idx] + history_context + "\n\n" + message[idx:]
-                else:
-                    message = f"{history_context}\n\n{message}"
+                self._persist_compression_snapshot(
+                    channel=channel,
+                    chat_id=chat_id,
+                    reason="invalid_request_recreate_stream",
+                    history_context=history_context,
+                    estimated_tokens=self._estimate_tokens(history_context),
+                )
+                history_context = self._apply_compression_constraints(history_context, channel, chat_id)
+                message = self._inject_history_before_user_message(message, history_context)
                 logger.info(f"Injected conversation history before user message (stream)")
             
             content_parts.clear()
@@ -1093,18 +1408,25 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
             old_session_id = await self._invalidate_session(key)
             history_context = ""
             if old_session_id:
-                history_context = self._extract_conversation_history(old_session_id, max_turns=4) or ""
+                history_context = self._extract_conversation_history(
+                    old_session_id,
+                    max_turns=4,
+                    token_budget=1200,
+                ) or ""
 
             session_id = await self._create_new_session(key, model)
 
             retry_message = message
             if history_context:
-                user_msg_marker = "用户消息:"
-                if user_msg_marker in retry_message:
-                    idx = retry_message.find(user_msg_marker)
-                    retry_message = retry_message[:idx] + history_context + "\n\n" + retry_message[idx:]
-                else:
-                    retry_message = f"{history_context}\n\n{retry_message}"
+                self._persist_compression_snapshot(
+                    channel=channel,
+                    chat_id=chat_id,
+                    reason="context_overflow_compact_retry_stream",
+                    history_context=history_context,
+                    estimated_tokens=self._estimate_tokens(history_context),
+                )
+                history_context = self._apply_compression_constraints(history_context, channel, chat_id)
+                retry_message = self._inject_history_before_user_message(retry_message, history_context)
                 logger.info("Injected compact conversation history before user message (stream)")
 
             content_parts.clear()
@@ -1135,8 +1457,9 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
         timeout: Optional[int] = None,
     ) -> str:
         key = self._get_session_key(channel, chat_id)
-        if key in self._session_map:
-            del self._session_map[key]
+        old_session = self._session_map.pop(key, None)
+        if old_session:
+            self._loaded_sessions.discard(old_session)
         
         return await self.chat(message, channel, chat_id, model, timeout)
     
@@ -1148,7 +1471,9 @@ TOOLS.md - Your Tools（你的工具）定义了你可以使用的工具列表�
     def clear_session(self, channel: str, chat_id: str) -> bool:
         key = self._get_session_key(channel, chat_id)
         if key in self._session_map:
-            del self._session_map[key]
+            old_session = self._session_map.pop(key, None)
+            if old_session:
+                self._loaded_sessions.discard(old_session)
             return True
         return False
     

@@ -105,9 +105,11 @@ async def _retry_async(func, *args, max_retries: int = 3, delay: float = 1.0, **
             return await func(*args, **kwargs)
         except (NetworkError, TimedOut, ConnectionError, OSError) as e:
             if isinstance(e, NetworkError):
-                if e.message.startswith("Message is not modified:"):
+                err_msg = str(getattr(e, "message", "") or "")
+                if err_msg.startswith("Message is not modified:"):
                     return None
-                
+            if "message is not modified" in str(e).lower():
+                return None
             last_error = e
             if attempt < max_retries - 1:
                 wait_time = delay * (2 ** attempt)  # exponential backoff
@@ -117,6 +119,8 @@ async def _retry_async(func, *args, max_retries: int = 3, delay: float = 1.0, **
                 logger.error(f"Failed after {max_retries} retries: {e}")
                 raise
         except Exception as e:
+            if "message is not modified" in str(e).lower():
+                return None
             # For non-network errors, check if it's a connection issue
             if "disconnected" in str(e).lower() or "connection" in str(e).lower():
                 last_error = e

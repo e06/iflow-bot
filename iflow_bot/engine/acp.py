@@ -827,7 +827,12 @@ class ACPAdapter:
         
         return None
     
-    def _extract_conversation_history(self, session_id: str, max_turns: int = 20) -> Optional[str]:
+    def _extract_conversation_history(
+        self,
+        session_id: str,
+        max_turns: int = 20,
+        token_budget: int = 3000,
+    ) -> Optional[str]:
         """提取 session 对话历史并格式化成提示词。
         
         Args:
@@ -852,11 +857,8 @@ class ACPAdapter:
             if not chat_history:
                 return None
             
-            # 获取最近的对话轮次
-            recent_chats = chat_history[-max_turns:] if len(chat_history) > max_turns else chat_history
-            
-            conversations = []
-            for chat in recent_chats:
+            all_conversations: list[tuple[str, str, str]] = []
+            for chat in chat_history:
                 role = chat.get("role")
                 parts = chat.get("parts", [])
                 
@@ -896,7 +898,7 @@ class ACPAdapter:
                             time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
                         except:
                             pass
-                    conversations.append(f"{time_str}\n用户：{content}")
+                    all_conversations.append(("user", time_str, content))
                 
                 elif role == "model":
                     # 对于 model 响应，过滤掉系统提示
@@ -911,14 +913,17 @@ class ACPAdapter:
                         continue
                     
                     if len(content) > 10:
-                        conversations.append(f"我：{content}")
+                        all_conversations.append(("assistant", "", content))
             
-            if not conversations:
+            if not all_conversations:
                 return None
             
-            # 组装对话历史
-            history = "<history_context>\n" + "\n\n".join(conversations) + "\n</history_context>"
-            logger.info(f"Extracted {len(conversations)} conversation turns from session {session_id[:16]}...")
+            history = self._build_budgeted_history_context(
+                all_conversations,
+                token_budget=token_budget,
+                recent_turns=max_turns,
+            )
+            logger.info(f"Extracted {len(all_conversations)} conversation turns from session {session_id[:16]}...")
             return history
             
         except Exception as e:
@@ -952,6 +957,86 @@ class ACPAdapter:
     def _get_session_key(self, channel: str, chat_id: str) -> str:
         """获取会话键。"""
         return f"{channel}:{chat_id}"
+
+    @staticmethod
+    def _inject_history_before_user_message(message: str, history_context: str) -> str:
+        if not history_context:
+            return message
+        user_msg_marker = "用户消息:"
+        if user_msg_marker in message:
+            idx = message.find(user_msg_marker)
+            return message[:idx] + history_context + "\n\n" + message[idx:]
+        return f"{history_context}\n\n{message}"
+
+    @staticmethod
+    def _estimate_tokens(text: str) -> int:
+        if not text:
+            return 0
+        return max(1, len(text) // 4)
+
+    @staticmethod
+    def _clip_text(text: str, max_chars: int) -> str:
+        clean = (text or "").strip()
+        if len(clean) <= max_chars:
+            return clean
+        return clean[:max_chars].rstrip() + "..."
+
+    def _build_budgeted_history_context(
+        self,
+        conversations: list[tuple[str, str, str]],
+        token_budget: int = 3000,
+        recent_turns: int = 20,
+    ) -> str:
+        if not conversations:
+            return "<history_context>\n</history_context>"
+
+        def fmt(role: str, time_str: str, content: str, max_chars: int) -> str:
+            body = self._clip_text(content, max_chars)
+            if role == "user":
+                return f"{time_str}\n用户：{body}".strip()
+            return f"我：{body}"
+
+        recent = conversations[-recent_turns:] if recent_turns > 0 else []
+        older = conversations[:-len(recent)] if recent else conversations[:]
+
+        summary_lines: list[str] = []
+        if older:
+            summary_lines.append("更早对话摘要：")
+            for role, time_str, content in older[-40:]:
+                prefix = "用户" if role == "user" else "我"
+                item = self._clip_text(content, 120)
+                if time_str:
+                    summary_lines.append(f"- {time_str} {prefix}: {item}")
+                else:
+                    summary_lines.append(f"- {prefix}: {item}")
+
+        blocks = [fmt(role, time_str, content, 1600) for role, time_str, content in recent]
+        summary_block = "\n".join(summary_lines).strip()
+
+        def build_text(cur_summary: str, cur_blocks: list[str]) -> str:
+            parts: list[str] = []
+            if cur_summary:
+                parts.append(cur_summary)
+            parts.extend([b for b in cur_blocks if b.strip()])
+            return "<history_context>\n" + "\n\n".join(parts).strip() + "\n</history_context>"
+
+        text = build_text(summary_block, blocks)
+
+        while self._estimate_tokens(text) > token_budget and len(blocks) > 4:
+            blocks.pop(0)
+            text = build_text(summary_block, blocks)
+
+        if self._estimate_tokens(text) > token_budget and summary_block:
+            compact_summary_lines = []
+            for line in summary_lines[:24]:
+                compact_summary_lines.append(self._clip_text(line, 90))
+            summary_block = "\n".join(compact_summary_lines)
+            text = build_text(summary_block, blocks)
+
+        while self._estimate_tokens(text) > token_budget and len(text) > 200:
+            text = text[: max(200, int(len(text) * 0.9))].rstrip() + "\n</history_context>"
+
+        return text
 
     @staticmethod
     def _is_context_overflow_error(error_text: str) -> bool:
@@ -1094,14 +1179,7 @@ class ACPAdapter:
             
             # 如果有历史，注入到消息中（放在"用户消息:"之前）
             if history_context:
-                # 找到"用户消息:"的位置，在其之前插入历史记录
-                user_msg_marker = "用户消息:"
-                if user_msg_marker in message:
-                    idx = message.find(user_msg_marker)
-                    message = message[:idx] + history_context + "\n\n" + message[idx:]
-                else:
-                    # 如果没有找到"用户消息:"标记，放在最前面
-                    message = f"{history_context}\n\n{message}"
+                message = self._inject_history_before_user_message(message, history_context)
                 logger.info(f"Injected conversation history before user message")
             
             response = await self._client.prompt(
@@ -1115,17 +1193,16 @@ class ACPAdapter:
             old_session_id = await self._invalidate_session(key)
             history_context = ""
             if old_session_id:
-                history_context = self._extract_conversation_history(old_session_id, max_turns=4) or ""
+                history_context = self._extract_conversation_history(
+                    old_session_id,
+                    max_turns=4,
+                    token_budget=1200,
+                ) or ""
 
             session_id = await self._create_new_session(key, model)
             retry_message = message
             if history_context:
-                user_msg_marker = "用户消息:"
-                if user_msg_marker in retry_message:
-                    idx = retry_message.find(user_msg_marker)
-                    retry_message = retry_message[:idx] + history_context + "\n\n" + retry_message[idx:]
-                else:
-                    retry_message = f"{history_context}\n\n{retry_message}"
+                retry_message = self._inject_history_before_user_message(retry_message, history_context)
                 logger.info("Injected compact conversation history before user message")
 
             response = await self._client.prompt(
@@ -1223,14 +1300,7 @@ class ACPAdapter:
             
             # 如果有历史，注入到消息中（放在"用户消息:"之前）
             if history_context:
-                # 找到"用户消息:"的位置，在其之前插入历史记录
-                user_msg_marker = "用户消息:"
-                if user_msg_marker in message:
-                    idx = message.find(user_msg_marker)
-                    message = message[:idx] + history_context + "\n\n" + message[idx:]
-                else:
-                    # 如果没有找到"用户消息:"标记，放在最前面
-                    message = f"{history_context}\n\n{message}"
+                message = self._inject_history_before_user_message(message, history_context)
                 logger.info(f"Injected conversation history before user message (stream)")
             
             content_parts.clear()
@@ -1257,17 +1327,16 @@ class ACPAdapter:
             old_session_id = await self._invalidate_session(key)
             history_context = ""
             if old_session_id:
-                history_context = self._extract_conversation_history(old_session_id, max_turns=4) or ""
+                history_context = self._extract_conversation_history(
+                    old_session_id,
+                    max_turns=4,
+                    token_budget=1200,
+                ) or ""
 
             session_id = await self._create_new_session(key, model)
             retry_message = message
             if history_context:
-                user_msg_marker = "用户消息:"
-                if user_msg_marker in retry_message:
-                    idx = retry_message.find(user_msg_marker)
-                    retry_message = retry_message[:idx] + history_context + "\n\n" + retry_message[idx:]
-                else:
-                    retry_message = f"{history_context}\n\n{retry_message}"
+                retry_message = self._inject_history_before_user_message(retry_message, history_context)
                 logger.info("Injected compact conversation history before user message (stream)")
 
             content_parts.clear()

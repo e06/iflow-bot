@@ -584,6 +584,7 @@ class ConsoleService:
                 timeout=cfg.driver.timeout,
                 acp_host=cfg.driver.acp_host,
                 acp_port=cfg.driver.acp_port,
+                compression_trigger_tokens=getattr(cfg.driver, "compression_trigger_tokens", 88888),
             )
             return self._chat_adapter
 

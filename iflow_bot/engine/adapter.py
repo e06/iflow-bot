@@ -115,6 +115,7 @@ class IFlowAdapter:
         mode: Literal["cli", "acp", "stdio"] = "cli",
         acp_host: str = "localhost",
         acp_port: int = 8090,
+        compression_trigger_tokens: int = 88888,
     ):
         self.default_model = default_model
         self.thinking = thinking
@@ -123,6 +124,7 @@ class IFlowAdapter:
         self.mode = mode
         self.acp_host = acp_host
         self.acp_port = acp_port
+        self.compression_trigger_tokens = max(0, int(compression_trigger_tokens))
         
         # workspace 是 iflow 执行的工作目录
         if workspace:
@@ -179,6 +181,7 @@ class IFlowAdapter:
                 timeout=self.timeout,
                 default_model=self.default_model,
                 thinking=self.thinking,
+                active_compress_trigger_tokens=self.compression_trigger_tokens,
             )
             await self._stdio_adapter.connect()
             logger.info(f"StdioACP adapter connected")
