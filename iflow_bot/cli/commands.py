@@ -1223,7 +1223,7 @@ def onboard(
             "yolo": True,
             "thinking": False,
             "max_turns": 40,
-            "timeout": 1200,
+            "timeout": 180,
             "compression_trigger_tokens": 88888,
             "workspace": str(Path.home() / ".iflow-bot" / "workspace"),
             "extra_args": []

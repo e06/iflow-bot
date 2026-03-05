@@ -10,7 +10,7 @@ from loguru import logger
 from iflow_bot.config.schema import Config
 
 LEGACY_DEFAULT_TIMEOUT = 300
-NEW_DEFAULT_TIMEOUT = 1200
+NEW_DEFAULT_TIMEOUT = 180
 
 
 def get_config_dir() -> Path:
@@ -83,7 +83,7 @@ def _migrate_legacy_driver_timeout(data: dict) -> tuple[dict, bool]:
 
     Rules:
     - If `driver.timeout` is missing, set it to NEW_DEFAULT_TIMEOUT.
-    - If `driver.timeout` equals legacy default 300 (int or string), set to 1200.
+    - If `driver.timeout` equals legacy default 300 (int or string), set to NEW_DEFAULT_TIMEOUT.
     - Keep all other custom timeout values unchanged.
     """
     migrated = False
@@ -122,7 +122,7 @@ def _create_default_config(config_path: Path) -> None:
             "yolo": True,
             "thinking": False,
             "max_turns": 40,
-            "timeout": 1200,
+            "timeout": 180,
             "compression_trigger_tokens": 88888,
             "workspace": str(Path.home() / ".iflow-bot" / "workspace"),
             "extra_args": []
