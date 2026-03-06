@@ -261,6 +261,32 @@ class StdioACPClient:
                 continue
             except asyncio.CancelledError:
                 break
+            except asyncio.LimitOverrunError as e:
+                # 当单行超过 StreamReader limit 且未找到分隔符时，不要退出接收循环。
+                # 丢弃当前异常大块并继续，避免网关在 Windows 上直接“启动后退出”。
+                logger.warning(
+                    f"StdioACP receive oversized chunk (consumed={e.consumed}), draining and continue"
+                )
+                try:
+                    await self._process.stdout.readexactly(e.consumed)
+                except Exception:
+                    try:
+                        await self._process.stdout.read(max(e.consumed, 4096))
+                    except Exception:
+                        pass
+                continue
+            except ValueError as e:
+                # 某些 Python/平台组合会以 ValueError 形式抛出同类错误信息。
+                msg = str(e)
+                if "Separator is not found" in msg and "chunk exceed the limit" in msg:
+                    logger.warning(f"StdioACP receive oversized chunk (value error): {msg}")
+                    try:
+                        await self._process.stdout.read(4096)
+                    except Exception:
+                        pass
+                    continue
+                logger.error(f"StdioACP receive error: {e}")
+                break
             except Exception as e:
                 logger.error(f"StdioACP receive error: {e}")
                 break
