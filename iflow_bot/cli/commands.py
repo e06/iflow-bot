@@ -32,7 +32,20 @@ from rich.table import Table
 
 console = Console()
 
-__logo__ = "🤖"
+
+def _can_encode_in_stdout(text: str) -> bool:
+    """Return True if current stdout encoding can represent the given text."""
+    encoding = (getattr(sys.stdout, "encoding", None) or "utf-8")
+    try:
+        text.encode(encoding)
+        return True
+    except Exception:
+        return False
+
+
+_UNICODE_CONSOLE = _can_encode_in_stdout("✓🤖")
+_OK_MARK = "✓" if _UNICODE_CONSOLE else "OK"
+__logo__ = "🤖" if _UNICODE_CONSOLE else "iflow-bot"
 
 
 def _read_version_from_pyproject() -> str:
@@ -280,7 +293,7 @@ def ensure_iflow_ready() -> bool:
     if not check_iflow_installed():
         console.print("[red]安装后仍检测不到 iflow，请检查安装过程[/red]")
         return False
-    console.print("[green]✓ iflow 安装成功![/green]")
+    console.print(f"[green]{_OK_MARK} iflow 安装成功![/green]")
 
     # 检查是否登录
     if not check_iflow_logged_in():
@@ -348,7 +361,7 @@ def init_workspace(workspace: Path) -> None:
         }
         with open(settings_path, "w", encoding="utf-8") as f:
             json.dump(default_settings, f, indent=2, ensure_ascii=False)
-        console.print(f"[green]✓[/green] Created {settings_path}")
+        console.print(f"[green]{_OK_MARK}[/green] Created {settings_path}")
 
     # 检查 workspace 是否已经初始化（通过检查核心文件是否存在）
     core_files = ["AGENTS.md", "BOOT.md", "SOUL.md"]
@@ -378,7 +391,7 @@ def init_workspace(workspace: Path) -> None:
         dst = workspace / filename
         if src.exists() and not dst.exists():
             shutil.copy2(src, dst)
-            console.print(f"[green]✓[/green] Created {dst}")
+            console.print(f"[green]{_OK_MARK}[/green] Created {dst}")
 
     # 创建 memory 目录并复制 MEMORY.md
     memory_dir = workspace / "memory"
@@ -388,7 +401,7 @@ def init_workspace(workspace: Path) -> None:
     memory_dst = memory_dir / "MEMORY.md"
     if memory_src.exists() and not memory_dst.exists():
         shutil.copy2(memory_src, memory_dst)
-        console.print(f"[green]✓[/green] Created {memory_dst}")
+        console.print(f"[green]{_OK_MARK}[/green] Created {memory_dst}")
 
     # 创建 channel 目录（用于记录各渠道对话）
     channel_dir = workspace / "channel"
@@ -519,7 +532,7 @@ def gateway_start(
         # 保存 PID
         pid_file.write_text(str(process.pid))
         
-        console.print(f"[green]✓[/green] Gateway started (PID: {process.pid})")
+        console.print(f"[green]{_OK_MARK}[/green] Gateway started (PID: {process.pid})")
         console.print(f"[dim]Log file: {log_file}[/dim]")
     else:
         # 前台运行
@@ -572,7 +585,7 @@ def gateway_stop() -> None:
             subprocess.run(["taskkill", "/PID", str(pid), "/F"], capture_output=True)
         else:
             os.kill(pid, signal.SIGTERM)
-        console.print(f"[green]✓[/green] Gateway stopped (PID: {pid})")
+        console.print(f"[green]{_OK_MARK}[/green] Gateway stopped (PID: {pid})")
         pid_file.unlink()
     except ProcessLookupError:
         console.print("[yellow]Gateway process not found[/yellow]")
@@ -712,7 +725,7 @@ async def _run_gateway(config, verbose: bool = False) -> None:
         result = await _start_acp_server(acp_port)
         if result is not None:
             acp_process = result
-            console.print(f"[green]✓[/green] ACP 服务已启动 (PID: {acp_process.pid})")
+            console.print(f"[green]{_OK_MARK}[/green] ACP 服务已启动 (PID: {acp_process.pid})")
         else:
             # 检查端口是否已被占用（复用现有进程）
             import socket
@@ -720,7 +733,7 @@ async def _run_gateway(config, verbose: bool = False) -> None:
             port_in_use = sock.connect_ex(('localhost', acp_port)) == 0
             sock.close()
             if port_in_use:
-                console.print(f"[green]✓[/green] 复用现有 ACP 服务 (端口: {acp_port})")
+                console.print(f"[green]{_OK_MARK}[/green] 复用现有 ACP 服务 (端口: {acp_port})")
             else:
                 console.print("[red]✗ ACP 服务启动失败，回退到 CLI 模式[/red]")
                 mode = "cli"
@@ -852,7 +865,7 @@ async def _run_gateway(config, verbose: bool = False) -> None:
         await agent_loop.start_background()
         
         # 显示状态
-        console.print("[bold green]✓ Gateway 运行中！[/bold green]")
+        console.print(f"[bold green]{_OK_MARK} Gateway 运行中！[/bold green]")
         if channel_manager.enabled_channels:
             console.print(f"[dim]  渠道: {', '.join(channel_manager.enabled_channels)}[/dim]")
         
@@ -965,7 +978,7 @@ def console_run(
     if token:
         access_url += f"/?token={token}"
 
-    console.print(f"[green]✓[/green] Web 控制台启动中: [cyan]{access_url}[/cyan]")
+    console.print(f"[green]{_OK_MARK}[/green] Web 控制台启动中: [cyan]{access_url}[/cyan]")
     run_console(host=host, port=port, token=token or None)
 
 
@@ -985,7 +998,7 @@ def model(
     config.driver.model = name
     save_config(config)
 
-    console.print(f"[green]✓[/green] Model set to: [cyan]{name}[/cyan]")
+    console.print(f"[green]{_OK_MARK}[/green] Model set to: [cyan]{name}[/cyan]")
     console.print("[dim]Restart gateway to apply: iflow-bot gateway restart[/dim]")
 
 
@@ -1012,7 +1025,7 @@ def thinking(
     save_config(config)
 
     status = "启用" if enabled else "禁用"
-    console.print(f"[green]✓[/green] Thinking mode: [cyan]{status}[/cyan]")
+    console.print(f"[green]{_OK_MARK}[/green] Thinking mode: [cyan]{status}[/cyan]")
     console.print("[dim]Restart gateway to apply: iflow-bot gateway restart[/dim]")
 
 
@@ -1045,7 +1058,7 @@ def sessions(
     
     if clear and channel and chat_id:
         if mappings.clear_session(channel, chat_id):
-            console.print(f"[green]✓[/green] Cleared session for {channel}:{chat_id}")
+            console.print(f"[green]{_OK_MARK}[/green] Cleared session for {channel}:{chat_id}")
         else:
             console.print(f"[yellow]No session mapping found for {channel}:{chat_id}[/yellow]")
         return
@@ -1213,7 +1226,7 @@ def onboard(
     init_workspace(workspace)
 
     console.print()
-    console.print("[green]✓[/green] 初始化完成!")
+    console.print(f"[green]{_OK_MARK}[/green] 初始化完成!")
     console.print()
     console.print("[bold]配置文件位置:[/bold]")
     console.print(f"  {config_path}")
@@ -1331,7 +1344,7 @@ def cron_list(
         if job.state.last_status == "error":
             status += " [red](错误)[/red]"
         elif job.state.last_status == "ok":
-            status += " [green](✓)[/green]"
+            status += f" [green]({_OK_MARK})[/green]"
         
         table.add_row(job.id, job.name, sched, deliver_info, status, next_run)
     
@@ -1402,7 +1415,7 @@ def cron_add(
             delete_after_run=delete_after_run,
         )
         
-        console.print(f"[green]✓[/green] 已添加定时任务: {job.name} (ID: {job.id})")
+        console.print(f"[green]{_OK_MARK}[/green] 已添加定时任务: {job.name} (ID: {job.id})")
         
         if job.state.next_run_at_ms:
             next_run = _dt.fromtimestamp(job.state.next_run_at_ms / 1000)
@@ -1434,7 +1447,7 @@ def cron_remove(
     service = CronService(store_path)
     
     if service.remove_job(job_id):
-        console.print(f"[green]✓[/green] 已移除任务: {job_id}")
+        console.print(f"[green]{_OK_MARK}[/green] 已移除任务: {job_id}")
     else:
         console.print(f"[red]错误: 未找到任务 {job_id}[/red]")
         raise typer.Exit(1)
@@ -1452,7 +1465,7 @@ def cron_enable(
     
     job = service.enable_job(job_id, enabled=True)
     if job:
-        console.print(f"[green]✓[/green] 已启用任务: {job.name} ({job_id})")
+        console.print(f"[green]{_OK_MARK}[/green] 已启用任务: {job.name} ({job_id})")
     else:
         console.print(f"[red]错误: 未找到任务 {job_id}[/red]")
         raise typer.Exit(1)
@@ -1470,7 +1483,7 @@ def cron_disable(
     
     job = service.enable_job(job_id, enabled=False)
     if job:
-        console.print(f"[green]✓[/green] 已禁用任务: {job.name} ({job_id})")
+        console.print(f"[green]{_OK_MARK}[/green] 已禁用任务: {job.name} ({job_id})")
     else:
         console.print(f"[red]错误: 未找到任务 {job_id}[/red]")
         raise typer.Exit(1)
@@ -1499,7 +1512,7 @@ def cron_run(
     async def run_job():
         success = await service.run_job(job_id, force=force)
         if success:
-            console.print("[green]✓ 任务执行完成[/green]")
+            console.print(f"[green]{_OK_MARK} 任务执行完成[/green]")
         else:
             console.print("[red]✗ 任务未执行（可能已禁用，使用 --force 强制执行）[/red]")
     
