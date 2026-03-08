@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- test(recovery): Add end-to-end recovery-path coverage for active compression rotation, stream empty-response compact retry, and non-stream context-overflow compact retry.
+
 ## v0.3.5 - 2026-03-09
 
 - refactor(cross-platform): Remove shell-script runtime paths in favor of Python-managed startup/test entrypoints, including Docker entrypoint migration and MCP proxy script cleanup.
