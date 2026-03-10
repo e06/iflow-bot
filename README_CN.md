@@ -245,6 +245,9 @@ docker compose logs -f iflow-bot
       "panels": ["*"]
     }
   },
+  "messages": {
+    "new_conversation": "✨ New conversation started, previous context has been cleared."
+  },
   "log_level": "INFO",
   "log_file": ""
 }

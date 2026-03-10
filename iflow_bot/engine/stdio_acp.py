@@ -676,6 +676,11 @@ class StdioACPClient:
                                 
                                 if on_tool_call:
                                     await on_tool_call(tc)
+
+                                if status.lower() in {"error", "failed", "cancelled"}:
+                                    error_message = output_text or f"Tool {tc.tool_name} failed"
+                                    if not future.done():
+                                        future.set_result({"error": {"message": error_message}})
                 
                 except asyncio.TimeoutError:
                     continue

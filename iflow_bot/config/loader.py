@@ -216,6 +216,9 @@ def _create_default_config(config_path: Path) -> None:
                 "retry_delay_ms": 5000
             }
         },
+        "messages": {
+            "new_conversation": "✨ New conversation started, previous context has been cleared."
+        },
         "heartbeat": {
             "enabled": True,
             "interval_s": 1800

@@ -81,6 +81,17 @@ class AgentLoop:
 
         logger.info(f"AgentLoop initialized with model={model}, workspace={self.workspace}, streaming={streaming}")
 
+    def _get_new_conversation_message(self) -> str:
+        """获取新会话提示文案（可配置）。"""
+        if self.channel_manager and getattr(self.channel_manager, "config", None):
+            try:
+                messages = getattr(self.channel_manager.config, "messages", None)
+                if messages and getattr(messages, "new_conversation", None):
+                    return str(messages.new_conversation)
+            except Exception:
+                pass
+        return "✨ New conversation started, previous context has been cleared."
+
     def _get_bootstrap_content(self) -> tuple[Optional[str], bool]:
         """读取引导内容。
         
@@ -272,7 +283,7 @@ time: {now}
                     await self.bus.publish_outbound(OutboundMessage(
                         channel=msg.channel,
                         chat_id=msg.chat_id,
-                        content="✨ 已开始新对话，之前的上下文已清除。",
+                        content=self._get_new_conversation_message(),
                     ))
                     return
 
