@@ -219,6 +219,17 @@ time: {now}
             metadata=metadata or {},
         )
 
+    def _build_reply_metadata(self, msg: InboundMessage, extra: Optional[dict] = None) -> dict:
+        metadata = dict(extra or {})
+        if msg.metadata:
+            if "is_group" in msg.metadata:
+                metadata["is_group"] = msg.metadata.get("is_group")
+            if "group_id" in msg.metadata:
+                metadata["group_id"] = msg.metadata.get("group_id")
+            if "reply_to_id" not in metadata:
+                metadata["reply_to_id"] = msg.metadata.get("message_id")
+        return metadata
+
     async def run(self) -> None:
         """启动主循环。"""
         self._running = True
@@ -326,7 +337,7 @@ time: {now}
                         response=response,
                         channel=msg.channel,
                         chat_id=msg.chat_id,
-                        metadata={"reply_to_id": msg.metadata.get("message_id")},
+                        metadata=self._build_reply_metadata(msg),
                     )
                     await self.bus.publish_outbound(outbound)
                     logger.info(f"Response sent to {msg.channel}:{msg.chat_id}")
@@ -422,7 +433,7 @@ time: {now}
                                         channel=channel,
                                         chat_id=chat_id,
                                         content=segment,
-                                        metadata={"reply_to_id": msg.metadata.get("message_id")},
+                                        metadata=self._build_reply_metadata(msg),
                                     ))
                                     from iflow_bot.session.recorder import get_recorder
                                     recorder = get_recorder()
@@ -431,7 +442,7 @@ time: {now}
                                             channel=channel,
                                             chat_id=chat_id,
                                             content=segment,
-                                            metadata={"reply_to_id": msg.metadata.get("message_id")},
+                                            metadata=self._build_reply_metadata(msg),
                                         ))
                 return  # 不走字符缓冲逻辑
 
@@ -454,7 +465,7 @@ time: {now}
                         metadata={
                             "_progress": True,
                             "_streaming": True,
-                            "reply_to_id": msg.metadata.get("message_id"),
+                            **self._build_reply_metadata(msg),
                         },
                     ))
         
@@ -484,14 +495,14 @@ time: {now}
                             channel=msg.channel,
                             chat_id=msg.chat_id,
                             content=content_to_send,
-                            metadata={"reply_to_id": msg.metadata.get("message_id")},
+                            metadata=self._build_reply_metadata(msg),
                         ))
                         if recorder:
                             recorder.record_outbound(OutboundMessage(
                                 channel=msg.channel,
                                 chat_id=msg.chat_id,
                                 content=content_to_send,
-                                metadata={"reply_to_id": msg.metadata.get("message_id")},
+                                metadata=self._build_reply_metadata(msg),
                             ))
                 else:
                     remainder_to_send = (qq_segment_buffer + qq_line_buffer).strip()
@@ -500,14 +511,14 @@ time: {now}
                             channel=msg.channel,
                             chat_id=msg.chat_id,
                             content=remainder_to_send,
-                            metadata={"reply_to_id": msg.metadata.get("message_id")},
+                            metadata=self._build_reply_metadata(msg),
                         ))
                         if recorder:
                             recorder.record_outbound(OutboundMessage(
                                 channel=msg.channel,
                                 chat_id=msg.chat_id,
                                 content=remainder_to_send,
-                                metadata={"reply_to_id": msg.metadata.get("message_id")},
+                                metadata=self._build_reply_metadata(msg),
                             ))
 
             if not effective_content:
@@ -556,7 +567,7 @@ time: {now}
                         metadata={
                             "_progress": True,
                             "_streaming": True,
-                            "reply_to_id": msg.metadata.get("message_id"),
+                            **self._build_reply_metadata(msg),
                         },
                     ))
                     # 再发送流式结束标记
@@ -566,7 +577,7 @@ time: {now}
                         content="",
                         metadata={
                             "_streaming_end": True,
-                            "reply_to_id": msg.metadata.get("message_id"),
+                            **self._build_reply_metadata(msg),
                         },
                     ))
                 elif qq_channel and not final_content:
@@ -575,7 +586,7 @@ time: {now}
                         channel=msg.channel,
                         chat_id=msg.chat_id,
                         content=effective_content,
-                        metadata={"reply_to_id": msg.metadata.get("message_id")},
+                        metadata=self._build_reply_metadata(msg),
                     ))
                     from iflow_bot.session.recorder import get_recorder
                     recorder = get_recorder()
@@ -584,7 +595,7 @@ time: {now}
                             channel=msg.channel,
                             chat_id=msg.chat_id,
                             content=effective_content,
-                            metadata={"reply_to_id": msg.metadata.get("message_id")},
+                            metadata=self._build_reply_metadata(msg),
                         ))
                 logger.info(f"Streaming response completed for {msg.channel}:{msg.chat_id}")
             else:
@@ -596,7 +607,7 @@ time: {now}
                     channel=msg.channel,
                     chat_id=msg.chat_id,
                     content=fallback,
-                    metadata={"reply_to_id": msg.metadata.get("message_id")},
+                    metadata=self._build_reply_metadata(msg),
                 ))
                 logger.warning(f"Streaming produced empty output for {msg.channel}:{msg.chat_id}")
             
