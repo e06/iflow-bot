@@ -563,8 +563,19 @@ def start_mcp_proxy(port: int = 8888) -> bool:
     try:
         config_file = _resolve_mcp_proxy_config_file()
         if not config_file:
-            console.print("[yellow]MCP 代理配置文件不存在: ~/.iflow-bot/config/.mcp_proxy_config.json[/yellow]")
-            return False
+            try:
+                from iflow_bot.utils.helpers import sync_mcp_from_iflow
+                if sync_mcp_from_iflow(overwrite=False):
+                    config_file = _resolve_mcp_proxy_config_file()
+            except Exception:
+                config_file = None
+
+        if not config_file:
+            runtime_config = get_config_dir() / "config" / ".mcp_proxy_config.json"
+            runtime_config.parent.mkdir(parents=True, exist_ok=True)
+            if not runtime_config.exists():
+                runtime_config.write_text('{"mcpServers": {}}', encoding="utf-8")
+            config_file = runtime_config
 
         pid_file = get_mcp_proxy_pid_file()
         log_file = get_mcp_proxy_log_file()
@@ -701,11 +712,26 @@ def gateway_run(
     """前台运行 Gateway 服务（debug 模式）。"""
     print_banner()
 
+    config = load_config()
+
+    # 检查并启动 MCP 代理（与 gateway start 保持一致）
+    should_start_mcp = config.driver.mcp_proxy_auto_start if hasattr(config, "driver") and config.driver else True
+    if should_start_mcp and config.driver.mcp_proxy_enabled:
+        mcp_port = config.driver.mcp_proxy_port
+        if not check_mcp_proxy_running(mcp_port):
+            console.print(f"[cyan]正在启动 MCP 代理 (端口: {mcp_port})...[/cyan]")
+            if start_mcp_proxy(mcp_port):
+                console.print(f"[green]{_OK_MARK}[/green] MCP 代理已启动")
+            else:
+                console.print(f"[yellow]MCP 代理启动失败，将继续运行网关[/yellow]")
+        else:
+            console.print(f"[green]{_OK_MARK}[/green] MCP 代理已在运行 (端口: {mcp_port})")
+        console.print()
+
     # 检查 iflow 是否就绪
     if not ensure_iflow_ready():
         raise typer.Exit(1)
 
-    config = load_config()
     workspace = Path(config.get_workspace())
 
     # 初始化 workspace
