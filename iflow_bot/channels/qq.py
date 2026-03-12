@@ -357,6 +357,7 @@ class QQChannel(BaseChannel):
             # 提取图片并下载
             attachments = getattr(data, "attachments", None)
             image_urls = _extract_image_urls(attachments)
+            image_path: Optional[str] = None
             if image_urls:
                 image_path = await _download_image(
                     image_urls[0],
@@ -366,7 +367,10 @@ class QQChannel(BaseChannel):
                     content = _append_image_prompt(content, image_path)
 
             if not content:
-                content = "[发送了图片]"
+                if image_urls:
+                    content = "[发送了图片]"
+                else:
+                    return
 
             # 先发送 "Thinking..." 提示（非阻塞，不影响主流程）
             try:
@@ -426,6 +430,7 @@ class QQChannel(BaseChannel):
             # 提取图片并下载
             attachments = getattr(data, "attachments", None)
             image_urls = _extract_image_urls(attachments)
+            image_path: Optional[str] = None
             if image_urls:
                 image_path = await _download_image(
                     image_urls[0],
@@ -435,7 +440,10 @@ class QQChannel(BaseChannel):
                     content = _append_image_prompt(content, image_path)
 
             if not content:
-                content = "[发送了图片]"
+                if image_urls:
+                    content = "[发送了图片]"
+                else:
+                    return
 
             # 发送 "Thinking..." 提示（被动回复模式）
             try:
